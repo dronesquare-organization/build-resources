@@ -2,6 +2,10 @@
 # GitHub Releases 에 publish 한다. 본 repo 의 pyproject.toml `[tool.uv.sources] pdal`
 # 이 그 wheel URL 을 가리키므로 docker build / CI / 로컬 어디서도 PDAL source build 가
 # 발생하지 않는다. workflow_dispatch 로 PDAL 버전 갱신 시에만 수동 트리거.
+#
+# Matrix: x86_64 (ubuntu-latest) + aarch64 (ubuntu-24.04-arm). dronesquare-backend
+# 의 운영 환경은 Graviton (t4g.large, ARM64) — aarch64 wheel 이 prod 필수. x86_64 wheel
+# 은 로컬 개발 docker / amd64 환경 호환용.
 name: pdal-wheel-build
 
 on:
@@ -20,7 +24,7 @@ on:
         type: string
         default: "3.14"
       proj_version:
-        description: "PROJ version — manylinux_2_28 의 6.3 은 PDAL 2.10 요구사항 (9.0+) 미달"
+        description: "PROJ version"
         type: string
         default: "9.8.1"
       geos_version:
@@ -28,23 +32,27 @@ on:
         type: string
         default: "3.14.1"
       gdal_version:
-        description: "GDAL version — 3.13.0 은 너무 신생 (release 직후), 3.12.4 가 보수적"
+        description: "GDAL version — 3.13.0 은 신생, 3.12.4 가 보수적"
         type: string
         default: "3.12.4"
       libgeotiff_version:
-        description: "libgeotiff version — PDAL 2.10 의 REQUIRED dep (1.7.0+)"
+        description: "libgeotiff version"
         type: string
         default: "1.7.4"
 
 permissions:
-  contents: write  # GitHub Release 생성/asset upload
+  contents: write
 
 jobs:
   build:
-    name: build wheel
-    runs-on: ubuntu-latest
-    # push 트리거에서는 `inputs.*` 가 null. workflow_dispatch 와 push 양쪽 모두에서
-    # 동일하게 작동하도록 fallback (||) 으로 default 값을 일원화한다.
+    name: "build wheel (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runs_on: ubuntu-latest,    arch: x86_64,  cibw_arch: x86_64  }
+          - { runs_on: ubuntu-24.04-arm, arch: aarch64, cibw_arch: aarch64 }
     env:
       PDAL_NATIVE_VERSION: ${{ inputs.pdal_native_version || '2.10.1' }}
       PDAL_PYTHON_VERSION: ${{ inputs.pdal_python_version || '3.5.3' }}
@@ -63,26 +71,22 @@ jobs:
 
       - name: Compute Python ABI tag
         id: pytag
-        # "3.14" → "cp314" (PEP 425 wheel tag)
         run: |
           minor_no_dot=$(echo "${{ env.PYTHON_MINOR }}" | tr -d '.')
           echo "py_tag=cp${minor_no_dot}" >> "$GITHUB_OUTPUT"
 
-      # cibuildwheel 3.x 의 manylinux x86_64 디폴트는 이미 manylinux_2_28 이지만 명시 강제.
-      # manylinux_2_28 (AlmaLinux 8) 의 dnf 패키지가 RHEL 8 vintage (PROJ 6.3, GDAL 3.0) 라서
-      # PDAL 2.10 의 요구 (PROJ 9.0+) 미달. PROJ/GEOS/GDAL/PDAL 모두 source build 한다.
-      # 의존성 순서: PROJ → GEOS → GDAL → PDAL. 각 단계 install → ldconfig 후 다음 단계.
       - name: Build wheel
         uses: pypa/cibuildwheel@v3.4.1
         with:
           package-dir: pdal-python
           output-dir: wheelhouse
         env:
-          CIBW_BUILD: "${{ steps.pytag.outputs.py_tag }}-manylinux_x86_64"
+          CIBW_BUILD: "${{ steps.pytag.outputs.py_tag }}-manylinux_${{ matrix.cibw_arch }}"
+          CIBW_ARCHS_LINUX: ${{ matrix.cibw_arch }}
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_BEFORE_ALL_LINUX: |
             set -eux
-            # cmake/ninja 외에 native deps 빌드용 system libs (PDAL/python 의 deps 들이 추가로 link 할 수 있는 OS-level libs)
             dnf install -y \
                 libcurl-devel libxml2-devel sqlite-devel libtiff-devel \
                 zlib-devel openssl-devel \
@@ -113,8 +117,6 @@ jobs:
             ldconfig
 
             echo "=== libgeotiff ${{ env.LIBGEOTIFF_VERSION }} ==="
-            # PDAL 2.10 의 REQUIRED dep — manylinux_2_28 dnf 의 libgeotiff 가 없거나 너무 옛것이라 source build.
-            # libtiff (dnf libtiff-devel) + PROJ (위에서 source build) 만 의존.
             curl -fsSL "https://github.com/OSGeo/libgeotiff/releases/download/${{ env.LIBGEOTIFF_VERSION }}/libgeotiff-${{ env.LIBGEOTIFF_VERSION }}.tar.gz" | tar xz
             cmake -S "libgeotiff-${{ env.LIBGEOTIFF_VERSION }}" -B build-geotiff -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
@@ -126,10 +128,8 @@ jobs:
             ldconfig
 
             echo "=== GDAL ${{ env.GDAL_VERSION }} ==="
-            # PDAL 이 호출하는 GTIFGetOGISDefn / GTIFSetFromOGISDefn 는 libgeotiff 가 아니라
-            # GDAL 의 frmts/gtiff/gt_wkt_srs.cpp 에 정의되어 있고, 이는 GDAL 이 internal libgeotiff fork
-            # 를 빌드할 때만 export 된다 (PDAL issue #1575). 그래서 GDAL 은 internal TIFF/GeoTIFF 사용.
-            # 우리 source-build 한 libgeotiff 1.7.4 는 PDAL configure 의 find_package(GeoTIFF) 만족용.
+            # GTIFGetOGISDefn / GTIFSetFromOGISDefn 는 GDAL 의 frmts/gtiff/gt_wkt_srs.cpp 에 있고
+            # GDAL 이 internal libgeotiff fork 빌드 시만 export (PDAL issue #1575).
             curl -fsSL "https://github.com/OSGeo/gdal/releases/download/v${{ env.GDAL_VERSION }}/gdal-${{ env.GDAL_VERSION }}.tar.gz" | tar xz
             cmake -S "gdal-${{ env.GDAL_VERSION }}" -B build-gdal -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
@@ -160,7 +160,6 @@ jobs:
             CMAKE_PREFIX_PATH=/usr/local
             PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
             LD_LIBRARY_PATH=/usr/local/lib
-          # auditwheel 이 manylinux_2_28 policy 에 따라 wheel 안에 libpdal/libgdal/libgeos/libproj/libcurl 등을 bundle
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair -w {dest_dir} {wheel}"
 
       - name: Inspect wheel
@@ -175,17 +174,18 @@ jobs:
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v3.0.0
         with:
+          # 단일 release tag 에 양 platform wheel asset 모두 첨부 (matrix 가 동시 append)
           tag_name: pdal-${{ env.PDAL_PYTHON_VERSION }}-${{ steps.pytag.outputs.py_tag }}
-          name: "PDAL python ${{ env.PDAL_PYTHON_VERSION }} (${{ steps.pytag.outputs.py_tag }}, manylinux_2_28)"
+          name: "PDAL python ${{ env.PDAL_PYTHON_VERSION }} (${{ steps.pytag.outputs.py_tag }}, manylinux_2_28 x86_64 + aarch64)"
           body: |
-            Pre-built PDAL python wheel consumed by `pyproject.toml [tool.uv.sources] pdal`.
+            Pre-built PDAL python wheels for manylinux_2_28 (x86_64 + aarch64).
 
             - **PDAL native**: ${{ env.PDAL_NATIVE_VERSION }}
             - **PDAL python**: ${{ env.PDAL_PYTHON_VERSION }}
             - **Python ABI**: ${{ steps.pytag.outputs.py_tag }}
-            - **Platform**: manylinux_2_28_x86_64
-            - **Bundled native deps** (via auditwheel): libpdal, libgdal, libgeos, libproj, libcurl, libxml2, libsqlite3, ...
+            - **Platforms**: manylinux_2_28_x86_64, manylinux_2_28_aarch64
+            - **Bundled native deps** (via auditwheel): libpdal, libgdal, libgeos, libproj, libgeotiff, libcurl, libxml2, libsqlite3, ...
 
-            Built from PDAL/python source — single-file wheel that requires no system PDAL.
+            Single-file wheel that requires no system PDAL.
           files: wheelhouse/*.whl
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
