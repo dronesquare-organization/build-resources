@@ -177,13 +177,24 @@ jobs:
             LD_LIBRARY_PATH=/usr/local/lib
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair -w {dest_dir} {wheel}"
 
-      - name: Inspect wheel
+      - name: Inspect wheel (Linux / auditwheel)
+        if: runner.os == 'Linux'
         run: |
           ls -la wheelhouse/
           python -m pip install --user auditwheel
           for whl in wheelhouse/*.whl; do
             echo "=== auditwheel show $whl ==="
             python -m auditwheel show "$whl"
+          done
+
+      - name: Inspect wheel (macOS / delocate)
+        if: runner.os == 'macOS'
+        run: |
+          ls -la wheelhouse/
+          python -m pip install --user delocate
+          for whl in wheelhouse/*.whl; do
+            echo "=== delocate-listdeps $whl ==="
+            python -m delocate.cmd.delocate_listdeps "$whl"
           done
 
       - name: Publish to GitHub Releases
