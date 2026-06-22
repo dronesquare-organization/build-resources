@@ -1,26 +1,27 @@
-# pdal-wheels
+# build-resources
 
-Pre-built PDAL python wheels for [dronesquare-backend](https://github.com/dronesquare-organization/dronesquare-backend).
+Pre-built, self-contained build artifacts for [dronesquare-backend](https://github.com/dronesquare-organization/dronesquare-backend) — resources that need a heavy or non-trivial build, produced once in CI and published to [Releases](https://github.com/dronesquare-organization/build-resources/releases). Backend `docker build` / CI / local installs then pull a ready binary instead of building from source.
 
-Built via [cibuildwheel](https://github.com/pypa/cibuildwheel). All native dependencies (libpdal, libgdal, libgeos, libproj, libgeotiff, libcurl, libssl, ...) are bundled inside the wheel so installation requires no system PDAL.
+## Resources
 
-## Supported platforms
+### PDAL python wheels — [`.github/workflows/pdal.yml`](.github/workflows/pdal.yml)
 
-- **Linux x86_64** (manylinux_2_28) — source build of PROJ/GEOS/libgeotiff/GDAL/PDAL inside cibuildwheel docker, `auditwheel repair` bundles native deps. Used by backend amd64 docker image.
-- **Linux aarch64** (manylinux_2_28) — same as x86_64. Used by backend prod (Graviton t4g.large) + CI (ubuntu-24.04-arm).
-- **macOS arm64** (Apple Silicon) — `brew install pdal proj geos libgeotiff gdal`, `delocate-wheel` bundles brew dylibs. Used by macOS dev machines.
+Self-contained PDAL wheels (native libpdal/libgdal/libgeos/libproj/libgeotiff bundled). PyPI ships only an sdist (~10-min source build + system deps), so we build via [cibuildwheel](https://github.com/pypa/cibuildwheel) and publish per-platform wheels.
 
-## Consumed by
+- **Linux x86_64 / aarch64** (manylinux_2_28) — source build of PROJ/GEOS/libgeotiff/GDAL/PDAL, `auditwheel repair`.
+- **macOS arm64** (Apple Silicon) — `brew install`, `delocate-wheel`.
 
-```toml
-[tool.uv.sources]
-pdal = [
-    { url = "https://github.com/dronesquare-organization/pdal-wheels/releases/download/pdal-3.5.3-cp314/pdal-3.5.3-cp314-cp314-manylinux_2_28_x86_64.whl",  marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
-    { url = "https://github.com/dronesquare-organization/pdal-wheels/releases/download/pdal-3.5.3-cp314/pdal-3.5.3-cp314-cp314-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-    { url = "https://github.com/dronesquare-organization/pdal-wheels/releases/download/pdal-3.5.3-cp314/pdal-3.5.3-cp314-cp314-macosx_14_0_arm64.whl",      marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
-]
-```
+Consumed by backend `pyproject.toml` `[tool.uv.sources] pdal`.
 
-## Versions
+### Static ffmpeg / ffprobe — [`.github/workflows/ffmpeg.yml`](.github/workflows/ffmpeg.yml)
 
-See [Releases](https://github.com/dronesquare-organization/pdal-wheels/releases).
+Minimal **static** ffmpeg+ffprobe for geolog video thumbnail + capture_date. `--disable-everything` + a narrow allowlist → ~4.5 MB each, fully static (vs +299 MB for `apt-get install ffmpeg`). LGPLv3 + mbedTLS (`https` presigned-URL input). Build recipe: [`.github/ffmpeg/Dockerfile`](.github/ffmpeg/Dockerfile).
+
+- **linux-amd64** (ubuntu-latest), **linux-arm64** (ubuntu-24.04-arm / Graviton). Linux only — backend runs ffmpeg in-container; macOS dev uses `brew` or graceful degradation.
+- Decode h264/hevc/mpeg4/vp8/vp9/mjpeg; demux mov(mp4/m4v)/mkv/webm/avi; encode mjpeg. (av1 excluded.)
+
+Consumed by backend `Dockerfile` (`curl` the `ffmpeg-linux-$TARGETARCH` asset).
+
+## Updating
+
+Each resource is built by a manual `workflow_dispatch` with version inputs. See [Releases](https://github.com/dronesquare-organization/build-resources/releases).

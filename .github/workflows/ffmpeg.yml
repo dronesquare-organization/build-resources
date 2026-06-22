@@ -1,0 +1,76 @@
+# Minimal static ffmpeg/ffprobe (geolog thumbnail + capture_date only), published to GitHub Releases.
+# dronesquare-backend Dockerfile curls these binaries (apt ffmpeg 회피: ~4.5MB vs +299MB, 32s install 제거).
+# workflow_dispatch 로 ffmpeg 버전 갱신 시 수동 트리거.
+#
+# Matrix (Linux only — backend ffmpeg 는 컨테이너 런타임 전용; macOS 로컬은 brew / graceful-degradation):
+#   - amd64 (ubuntu-latest):     amd64 docker / x86_64
+#   - arm64 (ubuntu-24.04-arm):  backend prod (Graviton t4g.large)
+# JS action(node=glibc) 이 alpine(musl) 컨테이너에서 안 도므로, ubuntu(glibc) 러너에서
+# `docker build --output` 으로 alpine 빌드 산출 바이너리만 추출한다.
+name: ffmpeg-static-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: "FFmpeg release version — https://ffmpeg.org/releases/"
+        type: string
+        default: "7.1.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: "build ffmpeg (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runs_on: ubuntu-latest,    arch: amd64 }
+          - { runs_on: ubuntu-24.04-arm, arch: arm64 }
+    env:
+      FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '7.1.1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Build minimal static ffmpeg (alpine) + extract binaries
+        run: |
+          docker build \
+            --target export \
+            --build-arg FFMPEG_VERSION="${FFMPEG_VERSION}" \
+            --output type=local,dest=dist \
+            .github/ffmpeg
+          ls -la dist/
+
+      - name: Verify static + stage release assets
+        run: |
+          set -eux
+          file dist/ffmpeg dist/ffprobe
+          file dist/ffmpeg  | grep -q 'statically linked'
+          file dist/ffprobe | grep -q 'statically linked'
+          mkdir -p assets
+          cp dist/ffmpeg  "assets/ffmpeg-linux-${{ matrix.arch }}"
+          cp dist/ffprobe "assets/ffprobe-linux-${{ matrix.arch }}"
+          chmod +x assets/ffmpeg-linux-${{ matrix.arch }} assets/ffprobe-linux-${{ matrix.arch }}
+          ( cd assets && sha256sum "ffmpeg-linux-${{ matrix.arch }}" "ffprobe-linux-${{ matrix.arch }}" > "sha256sums-${{ matrix.arch }}.txt" )
+          cat "assets/sha256sums-${{ matrix.arch }}.txt"
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v3.0.0
+        with:
+          # 단일 release tag 에 amd64/arm64 job 이 각자 asset append (pdal.yml 과 동일 패턴).
+          tag_name: ffmpeg-${{ env.FFMPEG_VERSION }}
+          name: "Static FFmpeg ${{ env.FFMPEG_VERSION }} (minimal, geolog)"
+          body: |
+            Minimal **static** ffmpeg/ffprobe for dronesquare-backend geolog (video thumbnail + capture_date).
+
+            - **Linkage**: fully static (musl/alpine) — no runtime deps, runs in any Linux container.
+            - **Size**: ~4.5 MB each (vs ~110 MB full static / +299 MB `apt-get install ffmpeg`).
+            - **TLS**: mbedTLS (LGPLv3) — `https` presigned-URL input supported.
+            - **Codecs**: decode h264/hevc/mpeg4/vp8/vp9/mjpeg; demux mov(mp4/m4v)/matroska(mkv/webm)/avi; encode mjpeg. (av1 excluded — graceful degradation.)
+            - **Arches**: `ffmpeg-linux-amd64`, `ffmpeg-linux-arm64` (Graviton), + `ffprobe-*`, `sha256sums-*.txt`.
+          files: assets/*
+          fail_on_unmatched_files: false
