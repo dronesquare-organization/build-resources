@@ -85,6 +85,8 @@ jobs:
           # Linux: build minimal FFmpeg shared libs into /usr/local (inline — pdal.yml 패턴; cibuildwheel
           # 가 package-dir 의 untracked 파일을 컨테이너로 복사하지 않아 외부 스크립트 참조 불가).
           # codec allowlist 는 .github/ffmpeg/Dockerfile 과 동일, 단 shared/--disable-programs/--enable-pic.
+          # +udp: FFmpeg 8.x tls_mbedtls.c(DTLS) 가 ff_udp_set_remote_addr 참조 → shared lib 링크에 udp.o 필요
+          # (정적 7.1.1 은 dead-strip 으로 숨었음). 끝에서 ldd -r 로 미해소 심볼을 publish 전 차단.
           CIBW_BEFORE_ALL_LINUX: |
             set -eux
             dnf install -y nasm
@@ -103,7 +105,7 @@ jobs:
             ./configure \
                 --prefix=/usr/local --enable-shared --disable-static --enable-pic \
                 --disable-programs --disable-doc --disable-debug --disable-autodetect --disable-everything \
-                --enable-network --enable-protocol=file,pipe,http,https,tcp,tls \
+                --enable-network --enable-protocol=file,pipe,http,https,tcp,tls,udp \
                 --enable-demuxer=mov,matroska,avi --enable-decoder=h264,hevc,mpeg4,vp8,vp9,mjpeg \
                 --enable-parser=h264,hevc,mpeg4video,vp8,vp9,mjpeg \
                 --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
@@ -113,6 +115,13 @@ jobs:
                 --pkg-config-flags=--static --extra-cflags=-I/usr/local/include --extra-ldflags=-L/usr/local/lib
             make -j"$(nproc)"; make install; cd /tmp; rm -rf "ffmpeg-${FFMPEG_VERSION}"; ldconfig
             pkg-config --modversion libavcodec libavformat libavutil libavfilter libswscale libswresample
+            # link-check gate: shared lib 에 미해소(undefined) 심볼이 있으면 publish 전에 실패 (런타임 ImportError 차단)
+            for lib in /usr/local/lib/libav*.so /usr/local/lib/libsw*.so; do
+              if ldd -r "$lib" 2>&1 | grep "undefined symbol"; then
+                echo "FAIL: unresolved symbols in $lib"; exit 1
+              fi
+            done
+            echo "link check OK — no undefined symbols in libav*/libsw*"
           CIBW_ENVIRONMENT_LINUX: >-
             FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
             MBEDTLS_VERSION=${{ env.MBEDTLS_VERSION }}
