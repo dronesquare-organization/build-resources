@@ -17,7 +17,7 @@ Consumed by backend `pyproject.toml` `[tool.uv.sources] pdal`.
 
 Self-contained [PyAV](https://github.com/PyAV-Org/PyAV) wheels (FFmpeg `libav*` bundled) for geolog video thumbnail + capture_date — **in-process libav**, replacing the ffmpeg/ffprobe subprocess path. PyPI ships only `cp314t` (free-threaded) wheels for 3.14, so standard-GIL 3.14 would fall back to an sdist source build (needs FFmpeg dev libs); we build per-platform via cibuildwheel and bundle.
 
-- **Linux x86_64 / aarch64** (manylinux_2_28) — minimal FFmpeg libs source build ([`.github/av/build-ffmpeg-libs.sh`](.github/av/build-ffmpeg-libs.sh), same allowlist as the static ffmpeg recipe but `--enable-shared --disable-programs --enable-pic`), `auditwheel repair`. LGPLv3 + mbedTLS.
+- **Linux x86_64 / aarch64** (manylinux_2_28) — minimal FFmpeg libs source build (inline `CIBW_BEFORE_ALL_LINUX` in `av.yml`, same allowlist as the static ffmpeg recipe but `--enable-shared --disable-programs --enable-pic`), `auditwheel repair`. LGPLv3 + mbedTLS.
 - **macOS arm64** (Apple Silicon) — `brew install ffmpeg`, `delocate-wheel` (dev wheel; full codec set).
 - Decode h264/hevc/mpeg4/vp8/vp9/mjpeg; demux mov(mp4/m4v)/mkv/webm/avi; encode mjpeg. (av1 excluded.)
 

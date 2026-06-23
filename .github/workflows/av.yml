@@ -63,12 +63,6 @@ jobs:
           ref: v${{ env.AV_VERSION }}
           path: pyav
 
-      - name: Stage Linux FFmpeg build recipe into package dir
-        if: runner.os == 'Linux'
-        # cibuildwheel mounts only the package-dir (pyav) into the manylinux container, so the
-        # recipe must live inside it for CIBW_BEFORE_ALL_LINUX `{project}/...` to reach it.
-        run: cp .github/av/build-ffmpeg-libs.sh pyav/build-ffmpeg-libs.sh
-
       - name: Compute Python ABI tag
         id: pytag
         run: |
@@ -88,8 +82,37 @@ jobs:
           CIBW_ARCHS_MACOS: ${{ matrix.cibw_arch }}
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
-          # Linux: build minimal FFmpeg libs into /usr/local; PyAV setup.py finds them via pkg-config.
-          CIBW_BEFORE_ALL_LINUX: bash {project}/build-ffmpeg-libs.sh
+          # Linux: build minimal FFmpeg shared libs into /usr/local (inline — pdal.yml 패턴; cibuildwheel
+          # 가 package-dir 의 untracked 파일을 컨테이너로 복사하지 않아 외부 스크립트 참조 불가).
+          # codec allowlist 는 .github/ffmpeg/Dockerfile 과 동일, 단 shared/--disable-programs/--enable-pic.
+          CIBW_BEFORE_ALL_LINUX: |
+            set -eux
+            dnf install -y nasm
+            cd /tmp
+            # mbedTLS: static + PIC → shared libav* 안에 링크 (추가 런타임 .so 없음)
+            curl -fsSL "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-${MBEDTLS_VERSION}/mbedtls-${MBEDTLS_VERSION}.tar.bz2" | tar xj
+            cmake -S "mbedtls-${MBEDTLS_VERSION}" -B build-mbedtls \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+                -DUSE_STATIC_MBEDTLS_LIBRARY=ON -DENABLE_TESTING=OFF -DENABLE_PROGRAMS=OFF
+            cmake --build build-mbedtls --target install --parallel
+            rm -rf build-mbedtls "mbedtls-${MBEDTLS_VERSION}"; ldconfig
+            # FFmpeg: shared libs, --disable-everything + geolog allowlist
+            curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" | tar xJ
+            cd "ffmpeg-${FFMPEG_VERSION}"
+            ./configure \
+                --prefix=/usr/local --enable-shared --disable-static --enable-pic \
+                --disable-programs --disable-doc --disable-debug --disable-autodetect --disable-everything \
+                --enable-network --enable-protocol=file,pipe,http,https,tcp,tls \
+                --enable-demuxer=mov,matroska,avi --enable-decoder=h264,hevc,mpeg4,vp8,vp9,mjpeg \
+                --enable-parser=h264,hevc,mpeg4video,vp8,vp9,mjpeg \
+                --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
+                --enable-filter=scale,format,null,copy --enable-encoder=mjpeg \
+                --enable-muxer=image2,image2pipe,mjpeg --enable-swscale --enable-swresample \
+                --enable-version3 --enable-mbedtls \
+                --pkg-config-flags=--static --extra-cflags=-I/usr/local/include --extra-ldflags=-L/usr/local/lib
+            make -j"$(nproc)"; make install; cd /tmp; rm -rf "ffmpeg-${FFMPEG_VERSION}"; ldconfig
+            pkg-config --modversion libavcodec libavformat libavutil libavfilter libswscale libswresample
           CIBW_ENVIRONMENT_LINUX: >-
             FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
             MBEDTLS_VERSION=${{ env.MBEDTLS_VERSION }}
