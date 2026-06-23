@@ -1,0 +1,148 @@
+# PyAV (av) self-contained wheel — FFmpeg libav* bundled — published to GitHub Releases.
+# `dronesquare-organization/dronesquare-backend` 의 pyproject.toml `[tool.uv.sources] av` 가
+# 그 wheel URL 을 가리켜 backend docker build / CI / 로컬 에서 PyAV source build 가 발생하지 않는다.
+#
+# WHY a custom wheel (not PyPI): PyPI `av` ships only `cp314t` (free-threaded) wheels for 3.14, so a
+# standard-GIL 3.14 falls back to an sdist source build (needs FFmpeg dev libs). This mirrors pdal.yml:
+# build once in CI against a minimal FFmpeg, bundle (auditwheel/delocate), publish per-platform wheels.
+#
+# Matrix:
+#   - Linux x86_64 (ubuntu-latest):    manylinux_2_28 + minimal FFmpeg libs source build (.github/av).
+#   - Linux aarch64 (ubuntu-24.04-arm): manylinux_2_28 — backend prod (Graviton t4g.large).
+#   - macOS arm64 (macos-14, Apple Silicon): brew ffmpeg + delocate. macOS dev `uv sync` 자동 install.
+#     (dev wheel — brew 의 full FFmpeg; prod Linux 만 minimal LGPL allowlist.)
+name: av-wheel-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      av_version:
+        description: "PyAV version (git tag without v) — https://github.com/PyAV-Org/PyAV/releases"
+        type: string
+        default: "17.1.0"
+      python_minor:
+        description: "Python minor version (예: 3.14)"
+        type: string
+        default: "3.14"
+      ffmpeg_version:
+        description: "FFmpeg release version — must match PyAV's libav API (17.1.0 → 8.1.x). https://ffmpeg.org/releases/"
+        type: string
+        default: "8.1.1"
+      mbedtls_version:
+        description: "mbedTLS version — https://github.com/Mbed-TLS/mbedtls/releases"
+        type: string
+        default: "3.6.6"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: "build wheel (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runs_on: ubuntu-latest,    arch: x86_64,  cibw_arch: x86_64,  cibw_platform: manylinux }
+          - { runs_on: ubuntu-24.04-arm, arch: aarch64, cibw_arch: aarch64, cibw_platform: manylinux }
+          - { runs_on: macos-14,         arch: arm64,   cibw_arch: arm64,   cibw_platform: macosx }
+    env:
+      AV_VERSION: ${{ inputs.av_version || '17.1.0' }}
+      PYTHON_MINOR: ${{ inputs.python_minor || '3.14' }}
+      FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '8.1.1' }}
+      MBEDTLS_VERSION: ${{ inputs.mbedtls_version || '3.6.6' }}
+    steps:
+      - name: Checkout build-resources (av build recipe)
+        uses: actions/checkout@v6.0.2
+
+      - name: Checkout PyAV source
+        uses: actions/checkout@v6.0.2
+        with:
+          repository: PyAV-Org/PyAV
+          ref: v${{ env.AV_VERSION }}
+          path: pyav
+
+      - name: Stage Linux FFmpeg build recipe into package dir
+        if: runner.os == 'Linux'
+        # cibuildwheel mounts only the package-dir (pyav) into the manylinux container, so the
+        # recipe must live inside it for CIBW_BEFORE_ALL_LINUX `{project}/...` to reach it.
+        run: cp .github/av/build-ffmpeg-libs.sh pyav/build-ffmpeg-libs.sh
+
+      - name: Compute Python ABI tag
+        id: pytag
+        run: |
+          minor_no_dot=$(echo "${{ env.PYTHON_MINOR }}" | tr -d '.')
+          echo "py_tag=cp${minor_no_dot}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wheel
+        uses: pypa/cibuildwheel@v3.4.1
+        with:
+          package-dir: pyav
+          output-dir: wheelhouse
+        env:
+          # platform tag 는 matrix.cibw_platform 으로 분기 (manylinux_{arch} | macosx_{arch}).
+          # cibuildwheel 이 OS 에 매치 안 되는 BEFORE_ALL_* / REPAIR_WHEEL_COMMAND_* 는 자동 무시.
+          CIBW_BUILD: "${{ steps.pytag.outputs.py_tag }}-${{ matrix.cibw_platform }}_${{ matrix.cibw_arch }}"
+          CIBW_ARCHS_LINUX: ${{ matrix.cibw_arch }}
+          CIBW_ARCHS_MACOS: ${{ matrix.cibw_arch }}
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
+          # Linux: build minimal FFmpeg libs into /usr/local; PyAV setup.py finds them via pkg-config.
+          CIBW_BEFORE_ALL_LINUX: bash {project}/build-ffmpeg-libs.sh
+          CIBW_ENVIRONMENT_LINUX: >-
+            FFMPEG_VERSION=${{ env.FFMPEG_VERSION }}
+            MBEDTLS_VERSION=${{ env.MBEDTLS_VERSION }}
+            PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+            LD_LIBRARY_PATH=/usr/local/lib
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: "auditwheel repair -w {dest_dir} {wheel}"
+          # macOS: brew 의 FFmpeg keg + pkg-config; delocate 가 dylib 들을 wheel 안에 bundle.
+          CIBW_BEFORE_ALL_MACOS: |
+            brew update
+            brew install ffmpeg pkg-config
+          CIBW_ENVIRONMENT_MACOS: >-
+            MACOSX_DEPLOYMENT_TARGET=14.0
+            PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: "delocate-wheel --require-archs ${{ matrix.cibw_arch }} -w {dest_dir} {wheel}"
+
+      - name: Inspect wheel (Linux / auditwheel)
+        if: runner.os == 'Linux'
+        run: |
+          ls -la wheelhouse/
+          python -m pip install --user auditwheel
+          for whl in wheelhouse/*.whl; do
+            echo "=== auditwheel show $whl ==="
+            python -m auditwheel show "$whl"
+          done
+
+      - name: Inspect wheel (macOS / delocate)
+        if: runner.os == 'macOS'
+        run: |
+          ls -la wheelhouse/
+          python -m pip install --user delocate
+          for whl in wheelhouse/*.whl; do
+            echo "=== delocate-listdeps $whl ==="
+            python -m delocate.cmd.delocate_listdeps "$whl"
+          done
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v3.0.0
+        with:
+          # 단일 release tag 에 모든 platform wheel asset 첨부 (matrix 각 job 이 동시 append).
+          tag_name: av-${{ env.AV_VERSION }}-${{ steps.pytag.outputs.py_tag }}
+          name: "PyAV ${{ env.AV_VERSION }} (${{ steps.pytag.outputs.py_tag }}, multi-platform, minimal FFmpeg)"
+          body: |
+            Pre-built self-contained PyAV wheels (FFmpeg libav* bundled — no system FFmpeg required).
+
+            PyPI ships only `cp314t` (free-threaded) wheels for 3.14, so standard-GIL 3.14 would fall back
+            to an sdist source build. These wheels are built with cibuildwheel against a minimal FFmpeg and
+            bundled (Linux: auditwheel + source build / macOS: delocate-wheel + brew keg).
+
+            - **PyAV**: ${{ env.AV_VERSION }}
+            - **FFmpeg**: ${{ env.FFMPEG_VERSION }} (LGPLv3 + mbedTLS; minimal geolog allowlist — Linux)
+            - **Python ABI**: ${{ steps.pytag.outputs.py_tag }} (standard GIL)
+            - **Platforms**: manylinux_2_28_x86_64, manylinux_2_28_aarch64, macosx_arm64
+            - **Codecs**: decode h264/hevc/mpeg4/vp8/vp9/mjpeg; demux mov(mp4/m4v)/mkv/webm/avi; encode mjpeg. (av1 excluded.)
+              (macOS dev wheel uses brew FFmpeg — full codec set — for dev convenience, mirroring pdal.)
+          files: wheelhouse/*.whl
+          fail_on_unmatched_files: false
