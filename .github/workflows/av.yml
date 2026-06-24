@@ -84,7 +84,7 @@ jobs:
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           # Linux: build minimal FFmpeg shared libs into /usr/local (inline — pdal.yml 패턴; cibuildwheel
           # 가 package-dir 의 untracked 파일을 컨테이너로 복사하지 않아 외부 스크립트 참조 불가).
-          # codec allowlist 는 .github/ffmpeg/Dockerfile 과 동일, 단 shared/--disable-programs/--enable-pic.
+          # codec allowlist 는 아래 ffmpeg configure 에 인라인. shared 빌드라 --enable-shared --disable-programs --enable-pic.
           # +udp: FFmpeg 8.x tls_mbedtls.c(DTLS) 가 ff_udp_set_remote_addr 참조 → shared lib 링크에 udp.o 필요
           # (정적 7.1.1 은 dead-strip 으로 숨었음). 끝에서 ldd -r 로 미해소 심볼을 publish 전 차단.
           CIBW_BEFORE_ALL_LINUX: |

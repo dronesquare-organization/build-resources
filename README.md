@@ -17,22 +17,11 @@ Consumed by backend `pyproject.toml` `[tool.uv.sources] pdal`.
 
 Self-contained [PyAV](https://github.com/PyAV-Org/PyAV) wheels (FFmpeg `libav*` bundled) for geolog video thumbnail + capture_date — **in-process libav**, replacing the ffmpeg/ffprobe subprocess path. PyPI ships only `cp314t` (free-threaded) wheels for 3.14, so standard-GIL 3.14 would fall back to an sdist source build (needs FFmpeg dev libs); we build per-platform via cibuildwheel and bundle.
 
-- **Linux x86_64 / aarch64** (manylinux_2_28) — minimal FFmpeg libs source build (inline `CIBW_BEFORE_ALL_LINUX` in `av.yml`, same allowlist as the static ffmpeg recipe but `--enable-shared --disable-programs --enable-pic`), `auditwheel repair`. LGPLv3 + mbedTLS.
+- **Linux x86_64 / aarch64** (manylinux_2_28) — minimal FFmpeg libs source build (inline `CIBW_BEFORE_ALL_LINUX` in `av.yml`, codec allowlist with `--enable-shared --disable-programs --enable-pic`), `auditwheel repair`. LGPLv3 + mbedTLS.
 - **macOS arm64** (Apple Silicon) — `brew install ffmpeg`, `delocate-wheel` (dev wheel; full codec set).
 - Decode h264/hevc/mpeg4/vp8/vp9/mjpeg; demux mov(mp4/m4v)/mkv/webm/avi; encode mjpeg. (av1 excluded.)
 
 Consumed by backend `pyproject.toml` `[tool.uv.sources] av`.
-
-### Static ffmpeg / ffprobe — [`.github/workflows/ffmpeg.yml`](.github/workflows/ffmpeg.yml) — *deprecated, superseded by PyAV*
-
-> **Deprecated.** The backend moved geolog video processing from the ffmpeg/ffprobe subprocess to in-process PyAV (see `av.yml` above). Kept for one release as a rollback target; remove once PyAV is verified in prod.
-
-Minimal **static** ffmpeg+ffprobe for geolog video thumbnail + capture_date. `--disable-everything` + a narrow allowlist → ~4.5 MB each, fully static (vs +299 MB for `apt-get install ffmpeg`). LGPLv3 + mbedTLS (`https` presigned-URL input). Build recipe: [`.github/ffmpeg/Dockerfile`](.github/ffmpeg/Dockerfile).
-
-- **linux-amd64** (ubuntu-latest), **linux-arm64** (ubuntu-24.04-arm / Graviton). Linux only — backend runs ffmpeg in-container; macOS dev uses `brew` or graceful degradation.
-- Decode h264/hevc/mpeg4/vp8/vp9/mjpeg; demux mov(mp4/m4v)/mkv/webm/avi; encode mjpeg. (av1 excluded.)
-
-Previously consumed by backend `Dockerfile` (`curl` the `ffmpeg-linux-$TARGETARCH` asset).
 
 ## Updating
 
